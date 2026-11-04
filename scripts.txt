@@ -1,0 +1,223 @@
+1///////////
+MATCH (e:Equipamento)
+OPTIONAL MATCH (e)-[:AFETADO_POR]->(v:Vulnerabilidade)
+WITH e, coalesce(SUM(v.cvss), 0.0) * e.fator_exposicao AS b_i
+SET e.risco_proprio = b_i
+RETURN e.nome AS Ativo, e.risco_proprio AS RiscoProprio;
+
+2///////////////
+// 1. Criar a projeção em memória
+CALL gds.graph.project(
+  'grafoRisco',
+  'Equipamento',
+  {
+    DEPENDE_DE: {
+      type: 'DEPENDE_DE',
+      orientation: 'NATURAL',
+      properties: 'peso'
+    }
+  },
+  {
+    nodeProperties: ['risco_proprio']
+  }
+);
+
+// 2. Executar o PageRank Ponderado e gravar o risco efetivo direto nos nós
+CALL gds.pageRank.write('grafoRisco', {
+  writeProperty: 'risco_efetivo',
+  relationshipWeightProperty: 'peso',
+  sourceNodes: [],
+  dampingFactor: 0.85,
+  maxIterations: 20
+})
+YIELD nodePropertiesWritten, computeMillis;
+
+// 3. Remover a projeção da memória
+CALL gds.graph.drop('grafoRisco');
+
+3/////////////////////
+MATCH (e:Equipamento)
+OPTIONAL MATCH (e)-[r:DEPENDE_DE]->(dep:Equipamento)
+OPTIONAL MATCH (e)-[vuln_rel:AFETADO_POR]->(v:Vulnerabilidade)
+RETURN e, r, dep, vuln_rel, v
+
+4///////
+// 1. Calcula a soma total de risco próprio no sistema
+MATCH (e:Equipamento)
+WITH sum(e.risco_proprio) AS risco_total
+
+// 2. Ajusta o risco efetivo para a escala CVSS
+MATCH (e:Equipamento)
+SET e.risco_efetivo_escalonado = e.risco_efetivo * risco_total
+RETURN e.nome, e.risco_proprio, e.risco_efetivo, e.risco_efetivo_escalonado;
+
+5////////////////
+CALL gds.pageRank.write('grafoRisco', {
+  writeProperty: 'risco_efetivo',
+  relationshipWeightProperty: 'peso',
+  sourceNodes: [],
+  dampingFactor: 0.85,
+  maxIterations: 20
+})
+
+6/////////////////
+// 1. Calcula a soma do Risco Próprio
+MATCH (e:Equipamento)
+WITH sum(e.risco_proprio) AS soma_risco_total
+
+// 2. Desnormaliza o Risco Efetivo do GDS para a escala do CVSS
+MATCH (e:Equipamento)
+SET e.risco_efetivo_cvss = e.risco_efetivo * soma_risco_total
+RETURN e.nome AS Ativo,
+       e.risco_proprio AS RiscoProprio,
+       e.risco_efetivo AS ProporcaoGDS,
+       e.risco_efetivo_cvss AS RiscoEfetivoCVSS
+ORDER BY RiscoEfetivoCVSS DESC;
+
+7///////////////
+// 1. Criar 4 novos ativos
+CREATE (serv_auth:Equipamento {id: "microservice-auth", nome: "Auth Microservice", tipo: "Microserviço", fator_exposicao: 1.1, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (worker:Equipamento {id: "background-worker", nome: "Async Worker Queue", tipo: "Worker", fator_exposicao: 0.9, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (s3_store:Equipamento {id: "object-storage", nome: "S3 Data Lake", tipo: "Storage", fator_exposicao: 1.4, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (monitor:Equipamento {id: "prometheus-mon", nome: "Prometheus Monitoring", tipo: "Monitoramento", fator_exposicao: 0.7, risco_proprio: 0.0, risco_efetivo: 0.0})
+
+// 2. Criar 3 novas vulnerabilidades críticas
+CREATE (v1:Vulnerabilidade {cve_id: "CVE-2021-44228", cvss: 10.0}) // Log4Shell
+CREATE (v2:Vulnerabilidade {cve_id: "CVE-2023-23397", cvss: 9.8})  // Elevation of Privilege
+CREATE (v3:Vulnerabilidade {cve_id: "CVE-2022-22965", cvss: 9.8})  // Spring4Shell
+
+// 3. Associar as vulnerabilidades a ativos estratégicos
+WITH serv_auth, worker, s3_store, monitor
+MATCH (app_server:Equipamento {id: "app-server"})
+MATCH (payment:Equipamento {id: "payment-api"})
+
+// Log4Shell no Core App Server e no Async Worker
+MATCH (v_log:Vulnerabilidade {cve_id: "CVE-2021-44228"})
+CREATE (app_server)-[:AFETADO_POR]->(v_log)
+CREATE (worker)-[:AFETADO_POR]->(v_log)
+
+// Spring4Shell na Payment API
+MATCH (v_spring:Vulnerabilidade {cve_id: "CVE-2022-22965"})
+CREATE (payment)-[:AFETADO_POR]->(v_spring)
+
+// 4. Criar novas conexões e dependências de propagação (DEPENDE_DE)
+CREATE (serv_auth)-[:DEPENDE_DE {peso: 0.35}]->(s3_store)
+CREATE (worker)-[:DEPENDE_DE {peso: 0.40}]->(s3_store)
+CREATE (app_server)-[:DEPENDE_DE {peso: 0.25}]->(serv_auth)
+CREATE (app_server)-[:DEPENDE_DE {peso: 0.20}]->(worker)
+CREATE (monitor)-[:DEPENDE_DE {peso: 0.10}]->(app_server);
+
+8/////////////////////
+MATCH (e:Equipamento)
+OPTIONAL MATCH (e)-[:AFETADO_POR]->(v:Vulnerabilidade)
+WITH e, coalesce(SUM(v.cvss), 0.0) * e.fator_exposicao AS b_i
+SET e.risco_proprio = b_i
+RETURN e.nome AS Ativo, e.risco_proprio AS RiscoProprio;
+
+9///////////////////
+
+// 1. Apagar a projeção antiga se ainda existir na memória
+CALL gds.graph.drop('grafoRisco', false);
+
+// 2. Criar a nova projeção atualizada
+CALL gds.graph.project(
+  'grafoRisco',
+  'Equipamento',
+  {
+    DEPENDE_DE: {
+      type: 'DEPENDE_DE',
+      orientation: 'NATURAL',
+      properties: 'peso'
+    }
+  },
+  {
+    nodeProperties: ['risco_proprio']
+  }
+);
+
+// 3. Rodar o PageRank
+CALL gds.pageRank.write('grafoRisco', {
+  writeProperty: 'risco_efetivo',
+  relationshipWeightProperty: 'peso',
+  dampingFactor: 0.85,
+  maxIterations: 20
+});
+
+// 4. Limpar projeção
+CALL gds.graph.drop('grafoRisco');
+
+10//////////////
+MATCH (e:Equipamento)
+WITH sum(e.risco_proprio) AS soma_risco_total
+
+MATCH (e:Equipamento)
+SET e.risco_efetivo_cvss = e.risco_efetivo * soma_risco_total
+RETURN e.nome AS Ativo,
+       round(e.risco_proprio, 2) AS RiscoProprio,
+       round(e.risco_efetivo, 4) AS ProporcaoGDS,
+       round(e.risco_efetivo_cvss, 2) AS RiscoEfetivoCVSS
+ORDER BY RiscoEfetivoCVSS DESC;
+
+11//////////////////////
+MATCH (e:Equipamento)
+OPTIONAL MATCH (e)-[r:DEPENDE_DE]->(dep:Equipamento)
+OPTIONAL MATCH (e)-[vuln_rel:AFETADO_POR]->(v:Vulnerabilidade)
+RETURN e, r, dep, vuln_rel, v
+
+12////////////////////////////
+// 1. Criar os novos ativos e já passar no WITH
+CREATE (serv_auth:Equipamento {id: "microservice-auth", nome: "Auth Microservice", tipo: "Microserviço", fator_exposicao: 1.1, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (worker:Equipamento {id: "background-worker", nome: "Async Worker Queue", tipo: "Worker", fator_exposicao: 0.9, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (s3_store:Equipamento {id: "object-storage", nome: "S3 Data Lake", tipo: "Storage", fator_exposicao: 1.4, risco_proprio: 0.0, risco_efetivo: 0.0})
+CREATE (monitor:Equipamento {id: "prometheus-mon", nome: "Prometheus Monitoring", tipo: "Monitoramento", fator_exposicao: 0.7, risco_proprio: 0.0, risco_efetivo: 0.0})
+
+// 2. Criar as vulnerabilidades
+CREATE (v1:Vulnerabilidade {cve_id: "CVE-2021-44228", cvss: 10.0})
+CREATE (v2:Vulnerabilidade {cve_id: "CVE-2023-23397", cvss: 9.8})
+CREATE (v3:Vulnerabilidade {cve_id: "CVE-2022-22965", cvss: 9.8})
+
+WITH serv_auth, worker, s3_store, monitor
+
+// 3. Buscar os ativos e vulnerabilidades existentes
+MATCH (app_server:Equipamento {id: "app-server"})
+MATCH (payment:Equipamento {id: "payment-api"})
+MATCH (v_log:Vulnerabilidade {cve_id: "CVE-2021-44228"})
+MATCH (v_spring:Vulnerabilidade {cve_id: "CVE-2022-22965"})
+
+// 4. Criar conexões de vulnerabilidades
+CREATE (app_server)-[:AFETADO_POR]->(v_log)
+CREATE (worker)-[:AFETADO_POR]->(v_log)
+CREATE (payment)-[:AFETADO_POR]->(v_spring)
+
+// 5. Criar dependências (DEPENDE_DE)
+CREATE (serv_auth)-[:DEPENDE_DE {peso: 0.35}]->(s3_store)
+CREATE (worker)-[:DEPENDE_DE {peso: 0.40}]->(s3_store)
+CREATE (app_server)-[:DEPENDE_DE {peso: 0.25}]->(serv_auth)
+CREATE (app_server)-[:DEPENDE_DE {peso: 0.20}]->(worker)
+CREATE (monitor)-[:DEPENDE_DE {peso: 0.10}]->(app_server);
+
+13//////////////////
+// PARTE 1: Criar os novos ativos
+CREATE (:Equipamento {id: "microservice-auth", nome: "Auth Microservice", tipo: "Microserviço", fator_exposicao: 1.1, risco_proprio: 0.0, risco_efetivo: 0.0});
+CREATE (:Equipamento {id: "background-worker", nome: "Async Worker Queue", tipo: "Worker", fator_exposicao: 0.9, risco_proprio: 0.0, risco_efetivo: 0.0});
+CREATE (:Equipamento {id: "object-storage", nome: "S3 Data Lake", tipo: "Storage", fator_exposicao: 1.4, risco_proprio: 0.0, risco_efetivo: 0.0});
+CREATE (:Equipamento {id: "prometheus-mon", nome: "Prometheus Monitoring", tipo: "Monitoramento", fator_exposicao: 0.7, risco_proprio: 0.0, risco_efetivo: 0.0});
+
+// PARTE 2: Criar as vulnerabilidades
+CREATE (:Vulnerabilidade {cve_id: "CVE-2021-44228", cvss: 10.0});
+CREATE (:Vulnerabilidade {cve_id: "CVE-2023-23397", cvss: 9.8});
+CREATE (:Vulnerabilidade {cve_id: "CVE-2022-22965", cvss: 9.8});
+
+// PARTE 3: Conectar Vulnerabilidades
+MATCH (e:Equipamento {id: "app-server"}), (v:Vulnerabilidade {cve_id: "CVE-2021-44228"}) CREATE (e)-[:AFETADO_POR]->(v);
+MATCH (e:Equipamento {id: "background-worker"}), (v:Vulnerabilidade {cve_id: "CVE-2021-44228"}) CREATE (e)-[:AFETADO_POR]->(v);
+MATCH (e:Equipamento {id: "payment-api"}), (v:Vulnerabilidade {cve_id: "CVE-2022-22965"}) CREATE (e)-[:AFETADO_POR]->(v);
+
+// PARTE 4: Conectar Dependências
+MATCH (a:Equipamento {id: "microservice-auth"}), (b:Equipamento {id: "object-storage"}) CREATE (a)-[:DEPENDE_DE {peso: 0.35}]->(b);
+MATCH (a:Equipamento {id: "background-worker"}), (b:Equipamento {id: "object-storage"}) CREATE (a)-[:DEPENDE_DE {peso: 0.40}]->(b);
+MATCH (a:Equipamento {id: "app-server"}), (b:Equipamento {id: "microservice-auth"}) CREATE (a)-[:DEPENDE_DE {peso: 0.25}]->(b);
+MATCH (a:Equipamento {id: "app-server"}), (b:Equipamento {id: "background-worker"}) CREATE (a)-[:DEPENDE_DE {peso: 0.20}]->(b);
+MATCH (a:Equipamento {id: "prometheus-mon"}), (b:Equipamento {id: "app-server"}) CREATE (a)-[:DEPENDE_DE {peso: 0.10}]->(b);
+
+14////////////////////

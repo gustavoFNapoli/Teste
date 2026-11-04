@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5.18.0-community
+    container_name: neo4j-cve-graph
+    ports:
+      - "7474:7474" # Interface Web (Neo4j Browser)
+      - "7687:7687" # Porta Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/senhasegura123
+      - NEO4J_PLUGINS=["graph-data-science", "apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=gds.*,apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=gds.*,apoc.*
+    volumes:
+      - neo4j_data:/data
+
+volumes:
+  neo4j_data:
